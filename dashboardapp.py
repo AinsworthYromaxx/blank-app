@@ -1,12 +1,102 @@
-<<<<<<< HEAD
 """V4 Quantum Portfolio Dashboard - Streamlit 1.55+"""
 
 import os
 import sys
 import json
+from datetime import datetime
+
+import numpy as np
+import pandas as pd
+import streamlit as st
+
+try:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    _HAS_MATPLOTLIB = True
+except ImportError:
+    plt = None
+    _HAS_MATPLOTLIB = False
+
+# -- Paths ------------------------------------------------------------------
+_HERE      = os.path.dirname(os.path.abspath(__file__))
+OUTPUT_DIR = os.path.join(_HERE, "output", "v3")
+CACHE_DIR  = os.path.join(_HERE, "cache", "v3")
+REPORT_DIR = os.path.join(OUTPUT_DIR, "reports")
+
+sys.path.insert(0, os.path.join(_HERE, "src"))
+_ROOT_SRC = os.path.join(os.path.dirname(_HERE), "src")
+if os.path.isdir(_ROOT_SRC) and _ROOT_SRC not in sys.path:
+    sys.path.insert(0, _ROOT_SRC)
+_V4_SRC = os.path.join(_HERE, "v4_ultimate", "src")
+if os.path.isdir(_V4_SRC) and _V4_SRC not in sys.path:
+    sys.path.insert(0, _V4_SRC)
+
+# -- Optional imports -------------------------------------------------------
+try:
+    import plotly.graph_objects as go
+    _HAS_PLOTLY = True
+except ImportError:
+    _HAS_PLOTLY = False
+
+try:
+    from v4_interactive_engine import fast_mc, format_aum
+    _HAS_ENGINE = True
+except ImportError:
+    _HAS_ENGINE = False
+    def format_aum(aum):
+        return f"${aum/1e6:.1f}M" if aum < 1e9 else f"${aum/1e9:.2f}B"
+
+_DARK = dict(
+    template="plotly_dark",
+    paper_bgcolor="#0e1117",
+    plot_bgcolor="#13151f",
+    font=dict(family="Inter, Arial, sans-serif", color="#e0e0e0", size=12),
+    margin=dict(l=10, r=10, t=48, b=10),
+)
+
+# -- Page config ------------------------------------------------------------
+st.set_page_config(
+    page_title="V4 Quantum Portfolio",
+    page_icon="\u269b\ufe0f",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+st.markdown(
+    "<style>"
+    "[data-testid='metric-container']{padding:8px 12px}"
+    "h4{color:#4a9eff;margin-top:1.2rem}"
+    "</style>",
+    unsafe_allow_html=True,
+)
+
+# -- Data loaders -----------------------------------------------------------
+
+@st.cache_data(ttl=3600)
+def load_regime():
+    from regime_detector import RegimeDetector
+    rd = RegimeDetector(cache_dir=CACHE_DIR)
+    regime = rd.detect(verbose=False)
+    return regime, rd.get_components(), rd.get_basis_weights()
+
+
+@st.cache_data(ttl=300)
+def load_portfolio():
+    if not os.path.isdir(OUTPUT_DIR):
+        return None, None
+    files = sorted(
+        [f for f in os.listdir(OUTPUT_DIR)
+         if f.startswith("ultimate_portfolio_") and f.endswith(".csv")],
+        reverse=True,
+    )
+    if not files:
+        return None, None
+    df = pd.read_csv(os.path.join(OUTPUT_DIR, files[0]))
     if "weight" in df.columns:
         df["weight"] = pd.to_numeric(df["weight"], errors="coerce")
     date_str = files[0].replace("ultimate_portfolio_", "").replace(".csv", "")
+    return df, date_str
 
 
 @st.cache_data(ttl=300)
@@ -36,19 +126,73 @@ def show_img(filename, caption="", src_dir=None):
         st.caption(f"*Not generated yet:* `{filename}`")
 
 
-def sector_bar(portfolio):
+def render_sector_bar(portfolio):
     sec = (portfolio.groupby("sector")["weight"]
            .sum().mul(100).sort_values(ascending=False))
-    colors = plt.cm.tab20.colors
-    fig, ax = plt.subplots(figsize=(7, 3.5))
-    ax.barh(sec.index[::-1], sec.values[::-1],
-            color=[colors[i % len(colors)] for i in range(len(sec) - 1, -1, -1)],
-            edgecolor="white", linewidth=0.4)
-    ax.set_xlabel("Allocation (%)")
-    ax.set_title("Sector Weights", fontsize=10)
-    ax.tick_params(labelsize=8)
-    plt.tight_layout()
-    return fig
+    if sec.empty:
+        st.info("No sector allocation data available.")
+        return
+
+    labels = list(sec.index[::-1])
+    values = sec.values[::-1]
+
+    if _HAS_PLOTLY:
+        palette = [
+            "#4a9eff",
+            "#72d572",
+            "#ffb347",
+            "#ff6b9d",
+            "#40e0d0",
+            "#f9ca24",
+            "#c3a6ff",
+            "#7ec8e3",
+        ]
+        fig = go.Figure(
+            go.Bar(
+                x=values,
+                y=labels,
+                orientation="h",
+                marker=dict(
+                    color=[palette[i % len(palette)] for i in range(len(values))],
+                    line=dict(color="rgba(255,255,255,0.25)", width=1),
+                ),
+                hovertemplate="%{y}: %{x:.2f}%<extra></extra>",
+            )
+        )
+        fig.update_layout(
+            **_DARK,
+            title=dict(text="Sector Weights", x=0.02, xanchor="left"),
+            xaxis_title="Allocation (%)",
+            yaxis_title=None,
+            height=max(280, 44 * len(values) + 80),
+            showlegend=False,
+        )
+        st.plotly_chart(fig, width="stretch")
+        return
+
+    if _HAS_MATPLOTLIB:
+        colors = plt.cm.tab20.colors
+        fig, ax = plt.subplots(figsize=(7, 3.5))
+        ax.barh(
+            labels,
+            values,
+            color=[colors[i % len(colors)] for i in range(len(values))],
+            edgecolor="white",
+            linewidth=0.4,
+        )
+        ax.set_xlabel("Allocation (%)")
+        ax.set_title("Sector Weights", fontsize=10)
+        ax.tick_params(labelsize=8)
+        plt.tight_layout()
+        st.pyplot(fig, width="stretch")
+        plt.close(fig)
+        return
+
+    st.dataframe(
+        sec.rename("allocation_pct").round(2).rename_axis("sector").reset_index(),
+        width="stretch",
+        hide_index=True,
+    )
 
 # -- HEADER -----------------------------------------------------------------
 hl, hr = st.columns([4, 1])
@@ -228,9 +372,7 @@ with tab_holdings:
 
         with cc:
             if "sector" in portfolio.columns and "weight" in portfolio.columns:
-                fig_sec = sector_bar(portfolio)
-                st.pyplot(fig_sec, width="stretch")
-                plt.close(fig_sec)
+                render_sector_bar(portfolio)
 
         if "zscore" in portfolio.columns:
             flagged = (portfolio[portfolio["zscore"].abs() >= 2.0]
@@ -641,8 +783,3 @@ with tab_q3d:
                                 file_name=fname, mime="text/html")
                 else:
                     st.info("Click **Render 3D** to generate interactive 3D plots.")
-=======
-"""Compatibility Streamlit entrypoint for the root dashboard."""
-
-from dashboardapp import *
->>>>>>> Add dashboard app and runtime dependencies

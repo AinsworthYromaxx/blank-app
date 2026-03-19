@@ -1,1 +1,12 @@
 streamlit
+numpy
+pandas
+matplotlib
+plotly
+requests
+tqdm
+yfinance
+scipy
+statsmodels
+finviz
+kaleido
